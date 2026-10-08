@@ -12,6 +12,11 @@ dependencies = [
     "python-dotenv",
     "requests",
     "xlwings",
+    "beautifulsoup4",
+    "lxml",
+    "word2number",
+    "dateparser",
+    "rapidfuzz",
 ]
 
 [project.scripts]
