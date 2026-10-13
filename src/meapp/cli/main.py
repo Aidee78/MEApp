@@ -1,11 +1,13 @@
 import logging
 import argparse
+import traceback
 from datetime import date
 
 
 from meapp.logging.setup import setup_logging
 from meapp.config import settings
 from meapp.application import workflow
+from meapp.exceptions import MEAppError
 
 
 
@@ -38,7 +40,7 @@ parser.add_argument(
 
 
 
-def main() -> None:
+def main() -> int:
     cli_args = parser.parse_args() # actually reads what the user supplied
 
     # First configure the logging infrastructure. Then obtain and use the application logger. 
@@ -47,18 +49,37 @@ def main() -> None:
     logger = logging.getLogger(__name__)
     
     logger.info("MEApp started.")
-
-    settings.Settings.validate() 
-
-
-    resolved_start_date, resolved_end_date = workflow.run(
-        start_date = cli_args.start_date,
-        end_date = cli_args.end_date,
-    )
-
-    logger.info(
-        "Resolved date range: %s to %s",
-        resolved_start_date,
-        resolved_end_date
-    )
-    
+    try:
+        settings.Settings.validate()
+        resolved_start_date, resolved_end_date = workflow.run(
+            start_date=cli_args.start_date,
+            end_date=cli_args.end_date,
+        )
+        logger.info(
+            "Resolved date range: %s to %s",
+            resolved_start_date,
+            resolved_end_date,
+        )
+        logger.info("MEApp stopped successfully.")
+        return 0
+    except MEAppError as exc:
+        # Application exception messages are designed to contain no secrets.
+        logger.error("MEApp stopped with an error: %s", exc)
+        logger.info("MEApp stopped.")
+        return 1
+    except Exception as exc:
+        # Do not print arbitrary exception text; a third-party error could
+        # contain request data. Components should wrap failures with safe context.
+        logger.error(
+            "MEApp stopped after an unexpected error (%s).",
+            type(exc).__name__,
+        )
+        for frame in traceback.extract_tb(exc.__traceback__):
+            logger.error(
+                "Failure location: %s:%s in %s.",
+                frame.filename,
+                frame.lineno,
+                frame.name,
+            )
+        logger.info("MEApp stopped.")
+        return 1

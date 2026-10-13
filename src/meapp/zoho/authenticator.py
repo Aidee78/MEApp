@@ -55,12 +55,46 @@ logger = logging.getLogger(__name__)
 
 class ZohoAuthenticator:
     """Handles authentication with Zoho"""
+    MAX_TOKEN_REQUEST_ATTEMPTS = 3
+    TOKEN_RETRY_DELAY_SECONDS = 2
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
         self._access_token: str | None = None
         self._access_token_expires_at: float | None = None
+
+    def _post_token_request(
+        self,
+        token_url: str,
+        params: dict[str, str],
+    ) -> requests.Response:
+        """POST to Zoho's token endpoint, retrying transient network failures."""
+        for attempt in range(1, self.MAX_TOKEN_REQUEST_ATTEMPTS + 1):
+            try:
+                return requests.post(
+                    url=token_url,
+                    data=params,
+                    timeout=self.settings.timeout,
+                )
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ):
+                if attempt == self.MAX_TOKEN_REQUEST_ATTEMPTS:
+                    raise
+
+                logger.warning(
+                    "Zoho token request connection failed; retrying "
+                    "(attempt %s/%s) after %s seconds.",
+                    attempt,
+                    self.MAX_TOKEN_REQUEST_ATTEMPTS,
+                    self.TOKEN_RETRY_DELAY_SECONDS,
+                )
+                time.sleep(self.TOKEN_RETRY_DELAY_SECONDS)
+
+        # The loop either returns a response or raises on its final attempt.
+        raise ZohoAuthenticationError("Token request retry loop ended unexpectedly.")
 
 
     def get_access_token(self) -> str:
@@ -93,11 +127,7 @@ class ZohoAuthenticator:
 
 
         try:
-            response = requests.post(
-                url = token_url,
-                data = params,
-                timeout = self.settings.timeout,
-            )
+            response = self._post_token_request(token_url, params)
 
         except requests.RequestException as exc:
             logger.error(
@@ -202,11 +232,7 @@ class ZohoAuthenticator:
         }
 
         try:
-            response = requests.post(
-                url = token_url,
-                data = params,
-                timeout = self.settings.timeout,
-            )
+            response = self._post_token_request(token_url, params)
 
         except requests.RequestException as exc:
             logger.error(

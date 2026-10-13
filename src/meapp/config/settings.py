@@ -11,6 +11,8 @@ import os
 
 from dotenv import find_dotenv,load_dotenv, set_key
 
+from meapp.exceptions import ConfigurationError
+
 
 # find the .env file automatically.
 ENV_FILE = find_dotenv()
@@ -62,13 +64,13 @@ class Settings:
         ]
 
         if missing_settings:
-            raise ValueError(
+            raise ConfigurationError(
                 "Missing required environment variables: "
                 + ", ".join(missing_settings)
             )
 
         if not cls.zoho_refresh_token and not cls.zoho_auth_code:
-            raise ValueError(
+            raise ConfigurationError(
                 "Either ZOHO_REFRESH_TOKEN or ZOHO_AUTH_CODE "
                 "must be configured."
             )
