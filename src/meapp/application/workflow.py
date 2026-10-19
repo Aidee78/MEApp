@@ -14,14 +14,11 @@ from meapp.services.notification import NotificationService
 from meapp.services.state import StateService
 from meapp.zoho.authenticator import ZohoAuthenticator
 from meapp.zoho.mail_client import ZohoMailClient
+from meapp.config.paths import LOCK_FILE, STATE_FILE, WORKBOOK_FILE
 
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-STATE_FILE = PROJECT_ROOT / "data" / "state.json"
-LOCK_FILE = PROJECT_ROOT / "data" / "meapp.lock"
-WORKBOOK_FILE = PROJECT_ROOT / "resources" / "maintenance report.xlsx"
 WORKSHEET_NAME = "MAINTENANCE DATA"
 
 

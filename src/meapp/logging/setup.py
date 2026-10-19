@@ -4,10 +4,18 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from meapp.config.paths import LOG_DIRECTORY, LOG_FILE
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-LOG_DIRECTORY = PROJECT_ROOT / "logs"
-LOG_FILE = LOG_DIRECTORY / "meapp.log"
+
+class RedConsoleFormatter(logging.Formatter):
+    RED = "\033[31m"
+    RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        if record.levelno >= logging.ERROR:
+            return f"{self.RED}{message}{self.RESET}"
+        return message
 
 
 def setup_logging() -> None:
@@ -17,12 +25,15 @@ def setup_logging() -> None:
         return
 
     LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
+    console_formatter = RedConsoleFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(console_formatter)
 
     file_handler = RotatingFileHandler(
         LOG_FILE,

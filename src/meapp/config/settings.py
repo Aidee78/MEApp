@@ -13,11 +13,10 @@ from dotenv import find_dotenv,load_dotenv, set_key
 
 from meapp.exceptions import ConfigurationError
 
+from meapp.config.paths import ENV_FILE
 
-# find the .env file automatically.
-ENV_FILE = find_dotenv()
 
-# Load the variables from the discovered .env file.
+# Load the variables from the .env file.
 load_dotenv(ENV_FILE)
 
 
@@ -78,7 +77,7 @@ class Settings:
     def save_refresh_token(self, refresh_token: str) -> None: 
         """Persist the Zoho refresh token to the .env file.""" 
         set_key(
-            ENV_FILE, 
+            str(ENV_FILE), 
             NAME_ZOHO_REFRESH_TOKEN, 
             refresh_token, 
         ) 

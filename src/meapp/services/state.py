@@ -16,6 +16,7 @@ class StateService:
 
     def __init__(self, state_file: Path) -> None:
         self.state_file = state_file
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
 
     def get_last_run_date(self) -> date:
         try:
