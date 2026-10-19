@@ -64,6 +64,21 @@ Planned work:
 
 ## Phase 6: Reliability & Operations — current status
 
+### Timestamp checkpoint update
+
+Implemented in source, pending manual verification:
+
+- Replaced the automatic date checkpoint with `last_successful_cutoff_utc` in UTC.
+- Automatic runs search from the saved cutoff through a cutoff captured at run start, so missed scheduled runs can catch up.
+- Explicit date options are converted to West Africa Time (UTC+1) calendar-day boundaries. Explicit backfills do not advance the automatic checkpoint.
+- The workflow processes one calendar day at a time: search and filter that day's messages, fetch and parse matching content, write rows, then continue to the next day.
+- The parser receives each message's local received date as its fallback date.
+- Added interval, per-date, message-count, no-work, and checkpoint logs without logging email bodies or credentials.
+
+The existing `data/state.json` must contain a timezone-aware `last_successful_cutoff_utc` value. Old `last_run_date` files are not migrated automatically. Pick the initial timestamp carefully because it determines which messages the next automatic run considers.
+
+Remaining risks include duplicate Excel rows if saving the workbook succeeds but saving the checkpoint fails, and duplicate rows when explicit backfills are repeated. The current source still processes every matching maintenance message and does not select only the latest applicable report.
+
 Implemented during the current work session:
 
 - Added a shared `MEAppError` hierarchy, including configuration, parsing,
@@ -94,3 +109,12 @@ Checks still pending:
 - Retry idempotency remains unresolved: a workbook save followed by a failed
   state update can cause records to be appended again on a later run. Any fix
   must follow the project's documented duplicate-date rule.
+- Manually verify date-search boundaries, received-time field names, automatic
+  catch-up, explicit backfills, and state non-advancement after failures. Do not
+  use the production workbook for these checks; use a copy.
+
+Checks completed for the timestamp change:
+
+- Python AST parsing succeeded for the five changed Python source files.
+- `git diff --check` reported no whitespace errors.
+- No automated tests, Zoho calls, or workbook operations were run.

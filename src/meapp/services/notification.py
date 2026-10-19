@@ -1,30 +1,55 @@
 """User-facing progress notices delivered through console and file logs."""
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 
 logger = logging.getLogger(__name__)
 
 
 class NotificationService:
-    """Report run status through the configured application log handlers."""
+    """Report run status through the configured log handlers."""
 
     def started(self) -> None:
         self._send(logging.INFO, "MEApp processing started.")
 
+    def retrieving_interval(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> None:
+        self._send(
+            logging.INFO,
+            "Retrieving maintenance messages in [%s, %s).",
+            start.isoformat(),
+            end.isoformat(),
+        )
+
     def retrieving_date(self, processing_date: date) -> None:
         self._send(
             logging.INFO,
-            "Retrieving maintenance reports for %s.",
+            "Retrieving maintenance messages for %s.",
             processing_date.isoformat(),
         )
 
-    def completed(self, end_date: date) -> None:
+    def no_work(self) -> None:
         self._send(
             logging.INFO,
-            "MEApp completed successfully through %s.",
-            end_date.isoformat(),
+            "No messages are due for processing; the checkpoint was not changed.",
+        )
+
+    def completed(
+        self,
+        start: datetime,
+        end: datetime,
+        checkpoint_updated: bool,
+    ) -> None:
+        self._send(
+            logging.INFO,
+            "MEApp completed for [%s, %s). Automatic checkpoint updated: %s.",
+            start.isoformat(),
+            end.isoformat(),
+            checkpoint_updated,
         )
 
     def failed(self, message: str) -> None:
@@ -36,6 +61,5 @@ class NotificationService:
         try:
             logger.log(level, message, *args)
         except Exception:
-            # Logging handlers normally contain their own I/O failures. This
-            # guard also protects workflow integrity if a custom handler raises.
+            # Logging handlers normally contain their own I/O failures.
             pass

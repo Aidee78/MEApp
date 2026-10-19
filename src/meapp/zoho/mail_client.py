@@ -12,7 +12,7 @@
 #       |
 #       +-- return Zoho response/data
 
-from datetime import date
+from datetime import date, datetime, time as datetime_time, timedelta, timezone, tzinfo
 import logging
 import time
 
@@ -468,3 +468,80 @@ class ZohoMailClient:
         )
     
         return content
+
+    def get_messages_for_date_between(
+        self,
+        account_id: str,
+        processing_date: date,
+        start: datetime,
+        end: datetime,
+        local_timezone: tzinfo,
+    ) -> list[tuple[dict, datetime]]:
+        """Get one day's messages that fall in the half-open interval [start, end)."""
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("Start timestamp must include a timezone.")
+        if end.tzinfo is None or end.utcoffset() is None:
+            raise ValueError("End timestamp must include a timezone.")
+
+        start_utc = start.astimezone(timezone.utc)
+        end_utc = end.astimezone(timezone.utc)
+        if start_utc > end_utc:
+            raise ValueError("Start timestamp must not be after end timestamp.")
+        if start_utc == end_utc:
+            return []
+
+        day_start = datetime.combine(
+            processing_date,
+            datetime_time.min,
+            tzinfo=local_timezone,
+        ).astimezone(timezone.utc)
+        day_end = (datetime.combine(
+            processing_date + timedelta(days=1),
+            datetime_time.min,
+            tzinfo=local_timezone,
+        )).astimezone(timezone.utc)
+        interval_start = max(start_utc, day_start)
+        interval_end = min(end_utc, day_end)
+
+        if interval_start >= interval_end:
+            return []
+
+        candidates = self.get_messages_for_date(
+            account_id=account_id,
+            processing_date=processing_date,
+        )
+        logger.info(
+            "Retrieved %s candidate messages for %s.",
+            len(candidates),
+            processing_date.isoformat(),
+        )
+
+        matches: list[tuple[dict, datetime]] = []
+        for message in candidates:
+            raw_received_time = message.get("receivedtime")
+            if raw_received_time is None:
+                raw_received_time = message.get("receivedTime")
+
+            try:
+                received_ms = int(raw_received_time)
+                received_at = datetime.fromtimestamp(
+                    received_ms / 1000,
+                    tz=timezone.utc,
+                )
+            except (TypeError, ValueError, OverflowError, OSError) as error:
+                logger.error(
+                    "A candidate Zoho message has an invalid received timestamp."
+                )
+                raise ZohoMailError(
+                    "A Zoho message is missing a valid received timestamp."
+                ) from error
+
+            if interval_start <= received_at < interval_end:
+                matches.append((message, received_at))
+
+        logger.info(
+            "Found %s messages within the interval on %s.",
+            len(matches),
+            processing_date.isoformat(),
+        )
+        return matches

@@ -12,15 +12,15 @@ Phase 6 (Reliability & Operations) is still in verification. Phase 7 documentati
 |---|---|
 | `cli/main.py` | Parses `--start-date` and `--end-date`, configures logging, invokes the workflow, and returns a process exit status. |
 | `config/settings.py` | Loads `.env` values, validates required settings, and persists a refresh token after an authorization-code exchange. |
-| `application/workflow.py` | Coordinates locking, state/date resolution, Zoho retrieval, parsing, Excel writes, state advancement, and run notices. |
+| `application/workflow.py` | Coordinates locking, timestamp-interval resolution, Zoho retrieval, parsing, Excel writes, state advancement, and run notices. |
 | `zoho/authenticator.py` | Exchanges an authorization code or refreshes a token, caches the access token in memory, and invalidates it after a 401 response. |
-| `zoho/mail_client.py` | Sends authenticated Zoho Mail API requests, retries timeout failures, retries once after HTTP 401, paginates message search results, and retrieves message content. |
+| `zoho/mail_client.py` | Sends authenticated Zoho Mail API requests, retries timeout failures, retries once after HTTP 401, paginates date-based message searches, filters one day's results to a received-time interval, and retrieves message content. |
 | `parsers/maintenance.py` | Parses HTML email content into a `MaintenanceReport`, extracting report date, shift, switchovers, generator rating, running time, load, and diesel volume. |
 | `models/maintenance.py` | Defines the dataclass used to represent the parsed values. Each field is stored as `(value, flag)`. |
 | `processor/maintenance.py` | Currently empty. No business-rule selection/aggregation is implemented in this module. |
 | `excel/writer.py` | Opens the workbook with `xlwings`, locates `MAINTENANCE DATA`/`Table2`, appends or reuses a blank final table row, writes columns A–H, applies flag formatting, and saves/closes according to the workflow's success signal. |
-| `services/state.py` | Reads and writes `data/state.json` and wraps invalid/unreadable state in `InvalidStateError`. |
-| `services/notification.py` | Emits start, per-date, completion, and failure notices through Python logging. |
+| `services/state.py` | Reads and writes the UTC timestamp checkpoint in `data/state.json` and wraps invalid/unreadable state in `InvalidStateError`. |
+| `services/notification.py` | Emits start, interval, per-date, no-work, completion, and failure notices through Python logging. |
 | `logging/setup.py` | Configures an error-level console handler and an info-level rotating file handler. |
 | `locking/instance.py` | Uses an OS-managed file lock to prevent concurrent MEApp runs. |
 | `exceptions/errors.py` | Defines the application exception hierarchy. |
@@ -31,12 +31,12 @@ Phase 6 (Reliability & Operations) is still in verification. Phase 7 documentati
 2. Logging is configured before normal application log records are emitted.
 3. Configuration is validated.
 4. `workflow.run()` acquires `data/meapp.lock`. The operating system releases the lock when its handle is closed or the process exits.
-5. The workflow reads `data/state.json` and resolves the inclusive processing range.
+5. The workflow reads `data/state.json` and resolves a half-open received-time interval. Automatic runs use the saved UTC cutoff through a cutoff captured at run start. Explicit date ranges use West Africa Time (UTC+1) midnight boundaries.
 6. It creates the Zoho authenticator and mail client, then retrieves the Zoho account ID.
 7. It opens `resources/maintenance report.xlsx` and the `MAINTENANCE DATA` worksheet.
-8. For each processing date, it searches messages received on that date, filters the subject, retrieves each matching message body, parses it, and writes the resulting report.
-9. After every requested date completes, the workflow marks the Excel session for saving. The context manager saves and closes the workbook.
-10. Only after workbook save/close succeeds does the workflow update `last_run_date`.
+8. For each local calendar date touched by the interval, it searches that day's messages, filters them by received timestamp and subject, retrieves each matching body, parses it using the message's received date as the parser fallback, and writes the report before moving to the next date.
+9. After every date in the interval is processed, the workflow marks the Excel session for saving. The context manager saves and closes the workbook.
+10. Only after workbook save/close succeeds does an automatic run update `last_successful_cutoff_utc`. Explicit-date runs do not advance the automatic checkpoint.
 11. Completion is logged. If an exception escapes the workflow, a failure notice is logged and the exception is re-raised for CLI handling.
 
 ## 4. Configuration and OAuth
@@ -51,18 +51,21 @@ Never log credentials, authorization headers, authorization codes, refresh/acces
 
 ## 5. Date resolution and state
 
-`resolve_date_range()` applies these rules:
+`resolve_time_range()` returns a half-open interval `[start, end)`:
 
-- Missing start date: `last_run_date + 1 day`.
-- Missing end date: the current local system date.
-- Explicit dates override their respective defaults.
-- A start date later than the end date raises `InvalidDateRangeError`.
+- Automatic run start: `last_successful_cutoff_utc` from state.
+- Automatic run end: UTC cutoff captured before retrieval starts.
+- Explicit `--start-date`: midnight at the start of that date in West Africa Time (UTC+1).
+- Explicit `--end-date`: midnight after that date in West Africa Time, used as an exclusive endpoint.
+- An omitted explicit boundary uses the automatic checkpoint or current run cutoff, respectively.
+- Explicit-date runs do not advance the automatic checkpoint.
+- A start later than the end raises `InvalidDateRangeError`; equal boundaries produce a no-work result.
 
-`generate_processing_dates()` yields every date in the range, including both boundaries.
+The workflow processes one local calendar date at a time. For each date, the Zoho client retrieves and paginates that day's candidate messages, then filters them using the received timestamp returned by Zoho. It returns only that day's interval matches; the workflow filters their subjects, fetches their full content, parses them, and writes them before requesting the next date. The received timestamp is compared as an absolute UTC time. The parser gets the message's local received date as its fallback; a report date parsed from the email body may differ.
 
-`StateService` reads the ISO date from `data/state.json`. Missing, malformed, unreadable, or structurally invalid state raises `InvalidStateError`. The state update is deliberately placed after the workbook context exits successfully.
+`StateService` reads `last_successful_cutoff_utc` as an ISO-8601 timezone-aware timestamp and normalizes it to UTC. Missing, malformed, unreadable, or old-format state raises `InvalidStateError`. State is advanced only after the workbook context exits successfully and only for automatic runs.
 
-There is a remaining failure window: the workbook can be saved successfully and the subsequent state write can fail. A later retry can append the same records again. The current implementation does not provide a transaction spanning Excel and the JSON state file, and idempotent recovery has not been implemented.
+There is a remaining failure window: the workbook can be saved successfully and the subsequent state write can fail. A later retry can append the same records again. The current implementation does not provide a transaction spanning Excel and the JSON state file, and idempotent recovery has not been implemented. Explicit backfills can also append duplicates when repeated.
 
 ## 6. Parsing and business rules
 
@@ -111,7 +114,7 @@ Expected failures derive from `MEAppError`, including configuration, date range,
 
 The following are known from the current source or development status and must not be treated as solved by documentation:
 
-1. **No end-to-end verification yet:** live Zoho and production workbook scenarios have not been run in this review.
+1. **No end-to-end verification yet:** live Zoho and production workbook scenarios have not been run in this review. Verify Zoho's received-time key casing and how its date search includes boundary dates using representative messages.
 2. **Retry idempotency:** workbook save followed by state-update failure can lead to duplicate appended records on retry.
 3. **Report selection:** the processor module is empty and the workflow writes every filtered message; superseded reports are not selected by the processor.
 4. **Failure-path verification:** test that failures during retrieval, parsing, writing, saving, and state update produce the expected exit status and do not advance state prematurely.

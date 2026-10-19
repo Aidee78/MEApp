@@ -2,9 +2,9 @@
 
 import logging
 from collections.abc import Iterator
-from datetime import date, timedelta
-from pathlib import Path
+from datetime import date, datetime, time, timedelta, timezone
 
+from meapp.config.paths import LOCK_FILE, STATE_FILE, WORKBOOK_FILE
 from meapp.config.settings import Settings
 from meapp.exceptions import InvalidDateRangeError, MEAppError, ZohoMailError
 from meapp.excel.writer import ExcelManager
@@ -14,41 +14,50 @@ from meapp.services.notification import NotificationService
 from meapp.services.state import StateService
 from meapp.zoho.authenticator import ZohoAuthenticator
 from meapp.zoho.mail_client import ZohoMailClient
-from meapp.config.paths import LOCK_FILE, STATE_FILE, WORKBOOK_FILE
 
 
 logger = logging.getLogger(__name__)
 
 WORKSHEET_NAME = "MAINTENANCE DATA"
+# Nigeria uses UTC+1 year-round. A fixed offset avoids requiring the optional
+# IANA timezone database on Windows installations.
+BUSINESS_TIMEZONE = timezone(timedelta(hours=1), name="WAT")
 
 
-def resolve_date_range(
+def resolve_time_range(
     start_date: date | None,
     end_date: date | None,
-    last_run_date: date,
-) -> tuple[date, date]:
-    """Resolve omitted boundaries and validate the inclusive date range."""
-    resolved_start_date = start_date or last_run_date + timedelta(days=1)
-    resolved_end_date = end_date or date.today()
+    last_cutoff: datetime,
+    run_cutoff: datetime,
+) -> tuple[datetime, datetime, bool]:
+    """Resolve a half-open received-time interval and explicit-run status."""
+    explicit_date_run = start_date is not None or end_date is not None # sets explicit_date_run to False if neither start or end dates were provided, such as in automated runs
 
-    if resolved_start_date > resolved_end_date:
-        raise InvalidDateRangeError(
-            "Start date must not be later than the end date."
+    if start_date is None:
+        resolved_start = last_cutoff
+    else:
+        resolved_start = datetime.combine(
+            start_date,
+            time.min,
+            tzinfo=BUSINESS_TIMEZONE,
         )
 
-    return resolved_start_date, resolved_end_date
+    if end_date is None:
+        resolved_end = run_cutoff
+    else:
+        # Midnight after the end date is exclusive, covering the full date.
+        resolved_end = datetime.combine(
+            end_date + timedelta(days=1),
+            time.min,
+            tzinfo=BUSINESS_TIMEZONE,
+        )
 
+    if resolved_start.astimezone(timezone.utc) > resolved_end.astimezone(timezone.utc):
+        raise InvalidDateRangeError(
+            "The start date or timestamp must not be later than the end."
+        )
 
-def generate_processing_dates(
-    start_date: date,
-    end_date: date,
-) -> Iterator[date]:
-    """Yield every date in the inclusive range."""
-    date_to_process = start_date
-
-    while date_to_process <= end_date:
-        yield date_to_process
-        date_to_process += timedelta(days=1)
+    return resolved_start, resolved_end, explicit_date_run
 
 
 def is_maintenance_mail(mail_subject: object) -> bool:
@@ -63,29 +72,56 @@ def is_maintenance_mail(mail_subject: object) -> bool:
     )
 
 
+def generate_processing_dates(
+    start_date: date,
+    end_date: date,
+) -> Iterator[date]:
+    """Yield every local calendar date in the inclusive range."""
+    processing_date = start_date
+    while processing_date <= end_date:
+        yield processing_date
+        processing_date += timedelta(days=1)
+
+
 def run(
     start_date: date | None,
     end_date: date | None,
-) -> tuple[date, date]:
-    """Retrieve, parse, and write reports, then record successful completion."""
+) -> tuple[datetime, datetime] | None:
+    """Process received messages, then commit the automatic checkpoint."""
     notifications = NotificationService()
 
     try:
-        # The lock covers state resolution as well as workbook and Zoho work.
+        # The lock covers checkpoint resolution, retrieval, and workbook work.
         with InstanceLock(LOCK_FILE):
             notifications.started()
+
+            # Capture before retrieval. Messages arriving after this point are
+            # picked up by the next automatic run.
+            run_cutoff = datetime.now(timezone.utc)
+
             state_service = StateService(STATE_FILE)
-            last_run_date = state_service.get_last_run_date()
-            resolved_start_date, resolved_end_date = resolve_date_range(
-                start_date,
-                end_date,
-                last_run_date,
+            last_cutoff = state_service.get_last_successful_cutoff()
+
+            resolved_start, resolved_end, explicit_date_run = resolve_time_range(
+                start_date=start_date,
+                end_date=end_date,
+                last_cutoff=last_cutoff,
+                run_cutoff=run_cutoff,
             )
 
+            start_utc = resolved_start.astimezone(timezone.utc)
+            end_utc = resolved_end.astimezone(timezone.utc)
+
+            if start_utc == end_utc:
+                notifications.no_work()
+                return None
+
+            notifications.retrieving_interval(resolved_start, resolved_end)
+
             logger.info(
-                "Processing maintenance reports from %s through %s.",
-                resolved_start_date.isoformat(),
-                resolved_end_date.isoformat(),
+                "Resolved received-time interval [%s, %s).",
+                resolved_start.isoformat(),
+                resolved_end.isoformat(),
             )
 
             settings = Settings()
@@ -93,21 +129,29 @@ def run(
             mail_client = ZohoMailClient(authenticator)
             account_id = mail_client.get_account_id()
 
+            first_day = start_utc.astimezone(BUSINESS_TIMEZONE).date()
+            last_day = (
+                end_utc - timedelta(microseconds=1)
+            ).astimezone(BUSINESS_TIMEZONE).date()
+
             with ExcelManager(WORKBOOK_FILE) as excel_manager:
                 excel_manager.open_worksheet(WORKSHEET_NAME)
 
                 for processing_date in generate_processing_dates(
-                    resolved_start_date,
-                    resolved_end_date,
+                    first_day,
+                    last_day,
                 ):
                     notifications.retrieving_date(processing_date)
-                    messages = mail_client.get_messages_for_date(
+                    day_messages = mail_client.get_messages_for_date_between(
                         account_id=account_id,
                         processing_date=processing_date,
+                        start=resolved_start,
+                        end=resolved_end,
+                        local_timezone=BUSINESS_TIMEZONE,
                     )
                     maintenance_messages = [
-                        message
-                        for message in messages
+                        (message, received_at)
+                        for message, received_at in day_messages
                         if is_maintenance_mail(message.get("subject"))
                     ]
 
@@ -117,10 +161,13 @@ def run(
                         processing_date.isoformat(),
                     )
 
-                    for message in maintenance_messages:
+                    for message, received_at in maintenance_messages:
                         folder_id = message.get("folderId")
                         message_id = message.get("messageId")
                         if folder_id is None or message_id is None:
+                            logger.error(
+                                "A maintenance message is missing required identifiers."
+                            )
                             raise ZohoMailError(
                                 "A maintenance message is missing required identifiers."
                             )
@@ -130,16 +177,31 @@ def run(
                             folder_id=str(folder_id),
                             message_id=str(message_id),
                         )
-                        report = maintenance_parser(content, processing_date)
+                        received_local_date = received_at.astimezone(
+                            BUSINESS_TIMEZONE
+                        ).date()
+                        report = maintenance_parser(content, received_local_date)
                         excel_manager.write_record(report)
 
-                # Commit workbook writes only after every requested date succeeds.
+                    logger.info(
+                        "Finished processing messages received on %s.",
+                        processing_date.isoformat(),
+                    )
+
+                # The context manager saves/closes before state is advanced.
                 excel_manager.save_progress = True
 
-            # Advance state only after workbook save and close succeed.
-            state_service.set_last_run_date(resolved_end_date)
-            notifications.completed(resolved_end_date)
-            return resolved_start_date, resolved_end_date
+            checkpoint_updated = not explicit_date_run
+            if checkpoint_updated:
+                state_service.set_last_successful_cutoff(run_cutoff)
+
+            notifications.completed(
+                resolved_start,
+                resolved_end,
+                checkpoint_updated=checkpoint_updated,
+            )
+            return resolved_start, resolved_end
+
     except Exception as exc:
         if isinstance(exc, MEAppError):
             failure_message = str(exc)

@@ -20,7 +20,7 @@ The project currently uses these Python dependencies: `python-dotenv`, `requests
 MEApp/
 ├── .env.example                 # Configuration template; no live secrets
 ├── data/
-│   ├── state.json               # Last successfully processed date
+│   ├── state.json               # Last successful received-time cutoff
 │   └── meapp.lock               # Runtime lock file
 ├── docs/
 │   ├── architecture.md          # Component and workflow design
@@ -118,33 +118,37 @@ meapp --end-date 2026-10-05
 meapp
 ```
 
-Dates must use `YYYY-MM-DD`. The end date is inclusive. MEApp rejects a range where the start date is later than the end date.
+Dates must use `YYYY-MM-DD`. Explicit start and end dates are interpreted in West Africa Time (UTC+1). The start date begins at midnight; the end date includes the full day.
 
 ### Date defaults and state
 
-`data/state.json` contains `last_run_date`, the most recent end date recorded after a successful run.
+`data/state.json` contains `last_successful_cutoff_utc`, the UTC timestamp through which an automatic run has successfully processed received messages. An automatic run searches from that timestamp up to a cutoff captured when the run starts. This lets a later run catch up after the computer misses its scheduled time.
 
-- If `--start-date` is omitted, the start date is one day after `last_run_date`.
-- If `--end-date` is omitted, the end date is the current local system date.
-- An explicitly supplied boundary overrides that boundary's default.
-- The workflow updates state only after the workbook has been saved and closed successfully.
+The expected state format is:
 
-The state value present in a project snapshot is runtime data, not a recommended value for a new installation. Back up and initialize `data/state.json` deliberately before the first production run. The current implementation raises an application error if the state file is missing or invalid; it does not automatically initialize a missing state file.
+```json
+{
+  "last_successful_cutoff_utc": "2026-10-18T23:00:00+00:00"
+}
+```
+
+The example is midnight October 19 in West Africa Time. Choose the initial checkpoint deliberately: messages received before it are not included by an automatic run. The application raises an error when the state file is missing, malformed, or still uses the old `last_run_date` format; it does not initialize or migrate the file automatically.
+
+Explicit date options define a local calendar-day backfill. The start is midnight at the beginning of `--start-date`; the end is midnight after `--end-date` and is treated as exclusive internally. If either option is omitted, that boundary uses the automatic checkpoint or the run's captured cutoff. Explicit-date runs do not advance the automatic checkpoint.
 
 **Important:** a workbook save can succeed and the subsequent state-file update can fail. In that case, a retry may append records again. Retry idempotency is a known unresolved operational risk; back up the workbook and do not assume rerunning a failed range is safe until this behavior is addressed.
 
 ## What the current workflow does
 
-For each date in the resolved inclusive range, MEApp:
+For the resolved received-time interval, MEApp:
 
 1. Acquires a single-instance operating-system lock.
-2. Loads state and resolves the date range.
+2. Loads the UTC timestamp checkpoint and resolves the received-time interval.
 3. Authenticates with Zoho and retrieves the account ID.
 4. Opens `resources/maintenance report.xlsx` and its `MAINTENANCE DATA` worksheet.
-5. Retrieves messages for each processing date, filters subjects beginning with `maintenance report` while excluding `re:` replies, and retrieves each matching message's content.
-6. Parses report values and writes them into the Excel table.
-7. Saves and closes the workbook after all requested dates complete.
-8. Advances `last_run_date` and logs successful completion.
+5. For each calendar date touched by the interval, retrieves that day's candidate messages, filters by exact received time and subject, then fetches, parses, and writes each maintenance message before moving to the next date.
+6. Saves and closes the workbook only after all dates in the requested interval complete successfully.
+7. For automatic runs, advances `last_successful_cutoff_utc` only after workbook save and close succeed. Explicit-date backfills leave that checkpoint unchanged.
 
 The workbook currently configured by the workflow has a `MAINTENANCE DATA` worksheet and a `Table2` table with columns A–H: report date, switch overs, generator, running time in hours, running time in minutes, load, diesel volume, and shift.
 
@@ -172,6 +176,7 @@ The project is **not yet declared production-ready**. Before unattended deployme
 
 - Complete manual verification of Phase 6 failure paths, lock behavior, logging, notifications, and state handling.
 - Resolve the risk of duplicate appends when workbook save succeeds but state update fails.
+- Verify the Zoho received-time field and date-search boundaries with representative mailbox messages; the API's date search supplies candidates and MEApp filters them by received timestamp.
 - Confirm the intended rule for multiple emails that map to the same report date. The current workflow writes each matching email directly; `src/meapp/processor/maintenance.py` is empty, so a “keep the latest applicable report” rule is not currently enforced there.
 - Verify workbook/table compatibility and extraction accuracy against a safe workbook copy and representative, sanitized messages.
 - Confirm recovery behavior for missing/invalid state, Zoho authentication failures, API failures, Excel failures, and partial runs.
